@@ -1,49 +1,39 @@
 #!/usr/bin/env bash
 # Install codex-insights
-# Usage: bash install.sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/atani/codex-insights/master/install.sh | bash
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="https://github.com/atani/codex-insights"
+INSTALL_DIR="${HOME}/.local/share/codex-insights"
 BIN_DIR="${HOME}/.local/bin"
-SKILLS_DIR="${HOME}/.skills"
 
 echo "Installing codex-insights..."
 
-# Ensure bin directory exists and is in PATH
 mkdir -p "$BIN_DIR"
 
-# Create skills symlink (~/.skills/codex-insights -> repo)
-mkdir -p "$SKILLS_DIR"
-ln -sfn "$REPO_DIR" "${SKILLS_DIR}/codex-insights"
-
-# Create bin symlink (~/.local/bin/codex-insights -> repo/codex-insights)
-ln -sfn "${REPO_DIR}/codex-insights" "${BIN_DIR}/codex-insights"
-
-# Make scripts executable
-chmod +x "${REPO_DIR}/codex-insights" "${REPO_DIR}/analyze.sh"
-
-# Claude Code integration
-CLAUDE_SKILLS="${HOME}/.claude/skills"
-if [[ -d "${HOME}/.claude" ]]; then
-  mkdir -p "$CLAUDE_SKILLS"
-  ln -sfn "${SKILLS_DIR}/codex-insights" "${CLAUDE_SKILLS}/codex-insights"
-  echo "  Claude Code skill linked"
+# Clone or update
+if [[ -d "$INSTALL_DIR/.git" ]]; then
+  git -C "$INSTALL_DIR" pull --quiet
+else
+  rm -rf "$INSTALL_DIR"
+  git clone --quiet "$REPO" "$INSTALL_DIR"
 fi
 
-# Codex CLI integration
-CODEX_SKILLS="${HOME}/.codex/skills"
-if [[ -d "${HOME}/.codex" ]]; then
-  mkdir -p "$CODEX_SKILLS"
-  ln -sfn "${SKILLS_DIR}/codex-insights" "${CODEX_SKILLS}/codex-insights"
-  echo "  Codex skill linked"
-fi
+chmod +x "${INSTALL_DIR}/codex-insights" "${INSTALL_DIR}/analyze.sh"
 
-echo ""
-echo "Installed! Run: codex-insights"
+# Bin
+ln -sfn "${INSTALL_DIR}/codex-insights" "${BIN_DIR}/codex-insights"
 
-# Check PATH
+# Skills (Claude Code / Codex)
+for dir in "${HOME}/.skills" "${HOME}/.claude/skills" "${HOME}/.codex/skills"; do
+  [[ -d "$(dirname "$dir")" ]] || continue
+  mkdir -p "$dir"
+  ln -sfn "$INSTALL_DIR" "${dir}/codex-insights"
+done
+
+echo "Done! Run: codex-insights"
+
 if ! echo "$PATH" | tr ':' '\n' | grep -q "^${BIN_DIR}$"; then
   echo ""
-  echo "NOTE: Add ${BIN_DIR} to your PATH:"
-  echo "  export PATH=\"\${HOME}/.local/bin:\${PATH}\""
+  echo "Add to PATH: export PATH=\"\${HOME}/.local/bin:\${PATH}\""
 fi
