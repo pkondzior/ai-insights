@@ -13,16 +13,154 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 ANALYZE_SH="${SCRIPT_DIR}/analyze.sh"
 
-echo "Analyzing Codex sessions..."
+CODEX_DIR="${HOME}/.codex"
+HISTORY="${CODEX_DIR}/history.jsonl"
+SESSIONS_DIR="${CODEX_DIR}/sessions"
+OUTPUT_DIR="${CODEX_DIR}/usage-data"
+INSIGHTS_JSON="${OUTPUT_DIR}/insights.json"
+mkdir -p "$OUTPUT_DIR"
+
+# ── Dependency check ──
+for cmd in jq bc claude; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "Error: $cmd is required." >&2
+    if [[ "$cmd" == "claude" ]]; then
+      echo "  Install Claude Code: https://docs.anthropic.com/en/docs/claude-code" >&2
+    else
+      echo "  brew install $cmd" >&2
+    fi
+    exit 1
+  fi
+done
+
+if [[ ! -f "$HISTORY" ]]; then
+  echo "Error: ${HISTORY} not found. Run Codex CLI first." >&2
+  exit 1
+fi
+
+# ── Flags ──
+FORCE=false
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=true ;;
+  esac
+done
+
+# ── AI Analysis: generate insights.json via claude -p ──
+generate_insights() {
+  echo "Generating AI analysis..."
+
+  # Collect context
+  local total_messages unique_sessions
+  total_messages=$(wc -l < "$HISTORY" | tr -d ' ')
+  unique_sessions=$(jq -r '.session_id' "$HISTORY" | sort -u | wc -l | tr -d ' ')
+
+  local sample_msgs
+  sample_msgs=$(jq -r '[.session_id[:8], .text] | join(": ")' "$HISTORY" | tail -80)
+
+  local projects
+  projects=$(find "$SESSIONS_DIR" -name '*.jsonl' -print0 2>/dev/null \
+    | xargs -0 jq -r 'select(.type == "session_meta") | .payload.cwd // empty' 2>/dev/null \
+    | sort | uniq -c | sort -rn | head -10)
+
+  local tools
+  tools=$(find "$SESSIONS_DIR" -name '*.jsonl' -print0 2>/dev/null \
+    | xargs -0 jq -r 'select(.type == "response_item") | .payload | select(.type == "function_call") | .name // empty' 2>/dev/null \
+    | sort | uniq -c | sort -rn | head -10)
+
+  local session_snippets=""
+  local count=0
+  for sf in $(find "$SESSIONS_DIR" -name '*.jsonl' 2>/dev/null | sort -r | head -5); do
+    session_snippets+="--- session $((count+1)) ---"$'\n'
+    session_snippets+=$(jq -c 'select(.type == "session_meta" or .type == "event_msg" or (.type == "response_item" and .payload.type == "function_call"))' "$sf" 2>/dev/null | head -15)
+    session_snippets+=$'\n'
+    count=$((count + 1))
+  done
+
+  local prompt
+  prompt=$(cat <<PROMPT
+Analyze this Codex CLI usage data and output ONLY valid JSON (no markdown, no code fences, no explanation).
+
+## Stats
+- Total messages: ${total_messages}
+- Sessions: ${unique_sessions}
+
+## Projects (count name):
+${projects}
+
+## Tools (count name):
+${tools}
+
+## Recent user messages (session: text):
+${sample_msgs}
+
+## Session snippets:
+${session_snippets}
+
+Output this exact JSON structure:
+{
+  "at_a_glance": {
+    "working": "what's working well (1-2 sentences, Japanese)",
+    "hindering": "what's causing friction (1-2 sentences, Japanese)",
+    "quick_wins": "easy improvements (1-2 sentences, Japanese)"
+  },
+  "wins": [{"title": "short title (Japanese)", "desc": "description (Japanese)"}],
+  "friction": [{"title": "short title", "desc": "description", "example": "concrete example from the data"}],
+  "instructions_additions": [{"text": "rule to add to instructions.md (Japanese)", "why": "reason (Japanese)"}],
+  "suggestions": [{"title": "numbered title", "desc": "description", "prompt": "ready-to-paste Codex prompt (Japanese)"}],
+  "comparison": {
+    "codex": ["bullet point about Codex usage"],
+    "claude": ["bullet point about Claude Code usage (if data available, otherwise skip)"]
+  }
+}
+
+Rules:
+- All text in Japanese
+- 3 wins, 3-4 friction points, 2-3 instructions additions, 3-5 suggestions
+- Suggestions must have actionable prompts that can be pasted directly into Codex
+- Base everything on the ACTUAL data above, do not fabricate
+- Output ONLY the JSON object, nothing else
+PROMPT
+  )
+
+  local response
+  response=$(claude -p "$prompt" 2>/dev/null) || true
+
+  # Strip markdown code fences if present
+  response=$(echo "$response" | sed '/^```/d')
+
+  if [[ -n "$response" ]] && echo "$response" | jq . >/dev/null 2>&1; then
+    echo "$response" | jq . > "$INSIGHTS_JSON"
+    echo "  Done."
+  else
+    echo "  AI analysis failed. Generating stats-only report." >&2
+    return 1
+  fi
+}
+
+# Run AI analysis (use cache if fresh < 1 hour)
+stale=true
+if [[ -f "$INSIGHTS_JSON" ]] && ! $FORCE; then
+  age=$(( $(date +%s) - $(stat -f %m "$INSIGHTS_JSON" 2>/dev/null || stat -c %Y "$INSIGHTS_JSON" 2>/dev/null || echo 0) ))
+  if [[ $age -lt 3600 ]]; then
+    stale=false
+    echo "Using cached analysis ($(( age / 60 ))min old). Use --force to refresh."
+  fi
+fi
+if $stale; then
+  generate_insights || true
+fi
+
+# ── Generate HTML report ──
+echo "Generating report..."
 output=$(bash "$ANALYZE_SH")
+echo "Report: ${output}"
 
-echo "Report generated: ${output}"
-
-# Open in browser (macOS: open, Linux: xdg-open)
+# Open in browser
 if command -v open &>/dev/null; then
   open "$output"
 elif command -v xdg-open &>/dev/null; then
   xdg-open "$output"
 else
-  echo "Open the report in your browser: ${output}"
+  echo "Open in browser: ${output}"
 fi

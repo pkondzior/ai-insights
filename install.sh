@@ -10,10 +10,14 @@ BIN_DIR="${HOME}/.local/bin"
 echo "Installing codex-insights..."
 
 # Check dependencies
-for cmd in git jq; do
+for cmd in git jq claude; do
   if ! command -v "$cmd" &>/dev/null; then
-    echo "Error: $cmd is required. Install it first:"
-    echo "  brew install $cmd"
+    echo "Error: $cmd is required." >&2
+    if [[ "$cmd" == "claude" ]]; then
+      echo "  Install Claude Code: https://docs.anthropic.com/en/docs/claude-code" >&2
+    else
+      echo "  brew install $cmd" >&2
+    fi
     exit 1
   fi
 done
