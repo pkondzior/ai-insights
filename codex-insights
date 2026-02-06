@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# codex-insights - Analyze Codex CLI session history and open HTML report
+# https://github.com/atani/codex-insights
+set -euo pipefail
+
+# Resolve symlinks to find real script location
+SOURCE="$0"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+ANALYZE_SH="${SCRIPT_DIR}/analyze.sh"
+
+echo "Analyzing Codex sessions..."
+output=$(bash "$ANALYZE_SH")
+
+echo "Report generated: ${output}"
+
+# Open in browser (macOS: open, Linux: xdg-open)
+if command -v open &>/dev/null; then
+  open "$output"
+elif command -v xdg-open &>/dev/null; then
+  xdg-open "$output"
+else
+  echo "Open the report in your browser: ${output}"
+fi
