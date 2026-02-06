@@ -16,8 +16,14 @@ mkdir -p "$OUTPUT_DIR"
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
 
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required. Install it: brew install jq" >&2
+  exit 1
+fi
+
 if [[ ! -f "$HISTORY" ]]; then
   echo "Error: ${HISTORY} not found" >&2
+  echo "Codex CLI のセッションデータが見つかりません。Codex を使ってからもう一度実行してください。" >&2
   exit 1
 fi
 

@@ -9,6 +9,15 @@ BIN_DIR="${HOME}/.local/bin"
 
 echo "Installing codex-insights..."
 
+# Check dependencies
+for cmd in git jq; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "Error: $cmd is required. Install it first:"
+    echo "  brew install $cmd"
+    exit 1
+  fi
+done
+
 mkdir -p "$BIN_DIR"
 
 # Clone or update
