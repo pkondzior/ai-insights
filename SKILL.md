@@ -7,7 +7,7 @@ description: Generate and report Codex usage insights.
 
 Usage:
 - Terminal: `codex-insights`
-- Interactive: `codex` -> type "Codex Insights を実行して"
+- Interactive: `codex` -> type "Run Codex Insights"
 
 Analyze Codex CLI session history and generate a usage report.
 

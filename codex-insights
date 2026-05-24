@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # codex-insights - Analyze Codex CLI session history and open HTML report
-# https://github.com/atani/codex-insights
+# https://github.com/pkondzior/ai-insights
 set -euo pipefail
 
 # Resolve symlinks to find real script location
@@ -20,8 +20,71 @@ OUTPUT_DIR="${CODEX_DIR}/usage-data"
 INSIGHTS_JSON="${OUTPUT_DIR}/insights.json"
 mkdir -p "$OUTPUT_DIR"
 
+# ── AI sampling limits (env-overridable) ──
+MAX_AI_MESSAGES="${CODEX_INSIGHTS_MAX_AI_MESSAGES:-20}"
+MAX_AI_SNIPPET_SESSIONS="${CODEX_INSIGHTS_MAX_AI_SNIPPET_SESSIONS:-3}"
+MAX_AI_SNIPPETS_PER_SESSION="${CODEX_INSIGHTS_MAX_AI_SNIPPETS_PER_SESSION:-8}"
+
+# ── Flags (defaults) ──
+AI_ANALYSIS=false
+INCLUDE_SNIPPETS=false
+FORCE=false
+OPEN_REPORT=true
+
+usage() {
+  cat <<'EOF'
+Usage:
+  codex-insights
+      Generate a local stats-only report from all Codex sessions.
+
+  codex-insights --ai
+      Generate AI insights from aggregate stats plus a small redacted sample.
+
+  codex-insights --ai --include-snippets
+      Include limited redacted snippets from recent session files.
+
+  codex-insights --ai --include-snippets --ai-snippet-sessions N
+      Include snippets from N recent session files.
+
+Options:
+  --ai                          Enable AI analysis (opt-in).
+  --stats-only, --no-ai         Disable AI analysis (default).
+  --include-snippets            Include redacted snippets in AI prompt.
+  --ai-messages N               Recent history messages sent to AI (default: 20).
+  --ai-snippet-sessions N       Recent session files for snippets (default: 3).
+  --ai-snippets-per-session N   JSONL lines per session snippet (default: 8).
+  --force                       Ignore cached insights and re-run AI analysis.
+  --no-open                     Do not open the report in a browser.
+  -h, --help                    Show this help.
+
+Privacy model:
+  - Local stats scan ALL Codex sessions.
+  - AI mode does NOT send full raw session history by default.
+  - Snippets are opt-in, redacted, truncated, and recent-only.
+EOF
+}
+
+# ── Parse args ──
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ai) AI_ANALYSIS=true; shift ;;
+    --stats-only|--no-ai) AI_ANALYSIS=false; shift ;;
+    --include-snippets) INCLUDE_SNIPPETS=true; shift ;;
+    --ai-messages) MAX_AI_MESSAGES="$2"; shift 2 ;;
+    --ai-snippet-sessions) MAX_AI_SNIPPET_SESSIONS="$2"; shift 2 ;;
+    --ai-snippets-per-session) MAX_AI_SNIPPETS_PER_SESSION="$2"; shift 2 ;;
+    --force) FORCE=true; shift ;;
+    --open) OPEN_REPORT=true; shift ;;
+    --no-open) OPEN_REPORT=false; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
 # ── Dependency check ──
-for cmd in jq codex; do
+required_cmds=(jq)
+[[ "$AI_ANALYSIS" == true ]] && required_cmds+=(codex)
+for cmd in "${required_cmds[@]}"; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "Error: $cmd is required." >&2
     [[ "$cmd" == "codex" ]] && echo "  Install Codex CLI: https://github.com/openai/codex" >&2
@@ -30,50 +93,100 @@ for cmd in jq codex; do
   fi
 done
 
-if [[ ! -f "$HISTORY" ]]; then
-  echo "Error: ${HISTORY} not found. Run Codex CLI first." >&2
-  exit 1
-fi
+# ── Resolve $HISTORY: legacy file → SQLite synth fallback (3a) ──
+# Newer Codex CLI no longer writes ~/.codex/history.jsonl; thread metadata lives
+# in state_5.sqlite. Synthesize a per-thread JSONL with shape {session_id, ts, text}
+# using each thread's first_user_message. One row per thread (not per message).
+HISTORY_SYNTH_TMP=""
+resolve_history() {
+  if [[ -f "$HISTORY" ]]; then
+    return 0
+  fi
+  local state_db="${CODEX_DIR}/state_5.sqlite"
+  if [[ ! -f "$state_db" ]]; then
+    echo "Error: neither ${HISTORY} nor ${state_db} found. Run Codex CLI first." >&2
+    exit 1
+  fi
+  if ! command -v sqlite3 &>/dev/null; then
+    echo "Error: sqlite3 is required to read ${state_db}." >&2
+    exit 1
+  fi
+  HISTORY_SYNTH_TMP="$(mktemp -t codex-insights-history.XXXXXX)"
+  trap 'rm -f "$HISTORY_SYNTH_TMP"' EXIT
+  sqlite3 "$state_db" <<SQL > "$HISTORY_SYNTH_TMP"
+SELECT json_object(
+  'session_id', id,
+  'ts', created_at,
+  'text', first_user_message,
+  'tokens', tokens_used,
+  'rollout_path', rollout_path
+)
+FROM threads
+ORDER BY created_at;
+SQL
+  HISTORY="$HISTORY_SYNTH_TMP"
+  echo "Using state_5.sqlite (one row per thread; 'messages' reflects thread count)."
+}
+resolve_history
 
-# ── Flags ──
-FORCE=false
-for arg in "$@"; do
-  case "$arg" in
-    --force) FORCE=true ;;
-  esac
-done
+# ── Redact common sensitive patterns before sending to AI ──
+redact_sensitive() {
+  sed -E \
+    -e 's/(sk|pk|rk)-[A-Za-z0-9_-]{16,}/[REDACTED_KEY]/g' \
+    -e 's/gh[poursu]_[A-Za-z0-9]{20,}/[REDACTED_GH_TOKEN]/g' \
+    -e 's/xox[abprs]-[A-Za-z0-9-]{10,}/[REDACTED_SLACK_TOKEN]/g' \
+    -e 's/AKIA[0-9A-Z]{16}/[REDACTED_AWS_KEY]/g' \
+    -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[REDACTED_EMAIL]/g' \
+    -e 's|/Users/[^/[:space:]"]+|/Users/[REDACTED]|g' \
+    -e 's|/home/[^/[:space:]"]+|/home/[REDACTED]|g' \
+    -e 's/Bearer [A-Za-z0-9._-]+/Bearer [REDACTED]/g'
+}
 
 # ── AI Analysis: generate insights.json via codex exec ──
 generate_insights() {
   echo "Generating AI analysis..."
 
-  # Collect context
+  # ── Full local scan across all session files (aggregate stats only) ──
   local total_messages unique_sessions
   total_messages=$(wc -l < "$HISTORY" | tr -d ' ')
   unique_sessions=$(jq -r '.session_id' "$HISTORY" | sort -u | wc -l | tr -d ' ')
 
-  local sample_msgs
-  sample_msgs=$(jq -r '[.session_id[:8], .text] | join(": ")' "$HISTORY" | tail -80)
-
-  local projects
+  local projects tools
   projects=$(find "$SESSIONS_DIR" -name '*.jsonl' -print0 2>/dev/null \
-    | xargs -0 jq -r 'select(.type == "session_meta") | .payload.cwd // empty' 2>/dev/null \
+    | xargs -0 jq -r 'select(.type == "session_meta") | (.payload.cwd // empty) | split("/") | .[-1]' 2>/dev/null \
     | sort | uniq -c | sort -rn | head -10)
 
-  local tools
   tools=$(find "$SESSIONS_DIR" -name '*.jsonl' -print0 2>/dev/null \
     | xargs -0 jq -r 'select(.type == "response_item") | .payload | select(.type == "function_call") | .name // empty' 2>/dev/null \
     | sort | uniq -c | sort -rn | head -10)
 
-  local session_snippets=""
-  local count=0
-  while IFS= read -r sf; do
-    [[ -z "$sf" ]] && continue
-    session_snippets+="--- session $((count+1)) ---"$'\n'
-    session_snippets+=$(jq -c 'select(.type == "session_meta" or .type == "event_msg" or (.type == "response_item" and .payload.type == "function_call"))' "$sf" 2>/dev/null | head -15)
-    session_snippets+=$'\n'
-    count=$((count + 1))
-  done < <(find "$SESSIONS_DIR" -name '*.jsonl' 2>/dev/null | sort -r | head -5)
+  # ── Limited AI-visible sample (redacted, recent only) ──
+  local sample_msgs
+  sample_msgs=$(jq -r '[.session_id[:8], ((.text // "") | gsub("\n"; " ") | .[0:300])] | join(": ")' "$HISTORY" \
+    | tail -n "$MAX_AI_MESSAGES" \
+    | redact_sensitive)
+
+  # ── Snippets omitted unless explicitly opted in ──
+  local session_snippets="[omitted by default; use --include-snippets to send redacted snippets]"
+  if [[ "$INCLUDE_SNIPPETS" == true ]]; then
+    session_snippets=""
+    local count=0
+    while IFS= read -r sf; do
+      [[ -z "$sf" ]] && continue
+      session_snippets+="--- session $((count+1)) ---"$'\n'
+      session_snippets+=$(jq -c '
+        select(
+          .type == "session_meta"
+          or .type == "event_msg"
+          or (.type == "response_item" and .payload.type == "function_call")
+        )
+      ' "$sf" 2>/dev/null \
+        | head -n "$MAX_AI_SNIPPETS_PER_SESSION" \
+        | redact_sensitive)
+      session_snippets+=$'\n'
+      count=$((count + 1))
+    done < <(find "$SESSIONS_DIR" -name '*.jsonl' 2>/dev/null | sort -r | head -n "$MAX_AI_SNIPPET_SESSIONS")
+  fi
 
   local tmpout
   tmpout=$(mktemp)
@@ -102,14 +215,14 @@ ${session_snippets}
 Output this exact JSON structure:
 {
   "at_a_glance": {
-    "working": "what's working well (1-2 sentences, Japanese)",
-    "hindering": "what's causing friction (1-2 sentences, Japanese)",
-    "quick_wins": "easy improvements (1-2 sentences, Japanese)"
+    "working": "what's working well (1-2 sentences, English)",
+    "hindering": "what's causing friction (1-2 sentences, English)",
+    "quick_wins": "easy improvements (1-2 sentences, English)"
   },
-  "wins": [{"title": "short title (Japanese)", "desc": "description (Japanese)"}],
+  "wins": [{"title": "short title (English)", "desc": "description (English)"}],
   "friction": [{"title": "short title", "desc": "description", "example": "concrete example from the data"}],
-  "instructions_additions": [{"text": "rule to add to instructions.md (Japanese)", "why": "reason (Japanese)"}],
-  "suggestions": [{"title": "numbered title", "desc": "description", "prompt": "ready-to-paste Codex prompt (Japanese)"}],
+  "instructions_additions": [{"text": "rule to add to instructions.md (English)", "why": "reason (English)"}],
+  "suggestions": [{"title": "numbered title", "desc": "description", "prompt": "ready-to-paste Codex prompt (English)"}],
   "comparison": {
     "codex": ["bullet point about Codex usage"],
     "claude": ["bullet point about Claude Code usage (if data available, otherwise skip)"]
@@ -117,7 +230,7 @@ Output this exact JSON structure:
 }
 
 Rules:
-- All text in Japanese
+- All text in English
 - 3 wins, 3-4 friction points, 2-3 instructions additions, 3-5 suggestions
 - Suggestions must have actionable prompts that can be pasted directly into Codex
 - Base everything on the ACTUAL data above, do not fabricate
@@ -137,17 +250,21 @@ PROMPT
   fi
 }
 
-# Run AI analysis (use cache if fresh < 1 hour)
-stale=true
-if [[ -f "$INSIGHTS_JSON" ]] && [[ "$FORCE" != true ]]; then
-  age=$(( $(date +%s) - $(stat -f %m "$INSIGHTS_JSON" 2>/dev/null || stat -c %Y "$INSIGHTS_JSON" 2>/dev/null || echo 0) ))
-  if [[ $age -lt 3600 ]]; then
-    stale=false
-    echo "Using cached analysis ($(( age / 60 ))min old). Use --force to refresh."
+# ── Run AI analysis only when explicitly enabled (cached < 1 hour) ──
+if [[ "$AI_ANALYSIS" == true ]]; then
+  stale=true
+  if [[ -f "$INSIGHTS_JSON" ]] && [[ "$FORCE" != true ]]; then
+    age=$(( $(date +%s) - $(stat -f %m "$INSIGHTS_JSON" 2>/dev/null || stat -c %Y "$INSIGHTS_JSON" 2>/dev/null || echo 0) ))
+    if [[ $age -lt 3600 ]]; then
+      stale=false
+      echo "Using cached analysis ($(( age / 60 ))min old). Use --force to refresh."
+    fi
   fi
-fi
-if [[ "$stale" == true ]]; then
-  generate_insights || true
+  if [[ "$stale" == true ]]; then
+    generate_insights || true
+  fi
+else
+  echo "AI analysis disabled. Run with --ai to enable (sends a small redacted sample)."
 fi
 
 # ── Generate HTML report ──
@@ -156,10 +273,12 @@ output=$(bash "$ANALYZE_SH")
 echo "Report: ${output}"
 
 # Open in browser
-if command -v open &>/dev/null; then
-  open "$output"
-elif command -v xdg-open &>/dev/null; then
-  xdg-open "$output"
-else
-  echo "Open in browser: ${output}"
+if [[ "$OPEN_REPORT" == true ]]; then
+  if command -v open &>/dev/null; then
+    open "$output"
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "$output"
+  else
+    echo "Open in browser: ${output}"
+  fi
 fi

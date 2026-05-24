@@ -1,22 +1,32 @@
 #!/usr/bin/env bash
-# Install codex-insights
-# Usage: curl -fsSL https://raw.githubusercontent.com/atani/codex-insights/master/install.sh | bash
+# Install ai-insights (codex-insights, claude-insights, insights)
+# Usage: curl -fsSL https://raw.githubusercontent.com/pkondzior/ai-insights/master/install.sh | bash
 set -euo pipefail
 
-REPO="https://github.com/atani/codex-insights"
-INSTALL_DIR="${HOME}/.local/share/codex-insights"
+REPO="https://github.com/pkondzior/ai-insights"
+INSTALL_DIR="${HOME}/.local/share/ai-insights"
 BIN_DIR="${HOME}/.local/bin"
 
-echo "Installing codex-insights..."
+echo "Installing ai-insights..."
 
-# Check dependencies
-for cmd in git jq codex; do
+# Hard dependencies
+for cmd in git jq; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "Error: $cmd is required." >&2
-    [[ "$cmd" == "codex" ]] && echo "  Install Codex CLI: https://github.com/openai/codex" >&2
-    [[ "$cmd" == "jq" ]] && echo "  brew install jq" >&2
+    [[ "$cmd" == "jq" ]]  && echo "  brew install jq" >&2
     [[ "$cmd" == "git" ]] && echo "  brew install git" >&2
     exit 1
+  fi
+done
+
+# Soft dependencies — warn but don't fail
+for cmd in codex claude sqlite3; do
+  if ! command -v "$cmd" &>/dev/null; then
+    case "$cmd" in
+      codex)    echo "Note: 'codex' not found — 'codex-insights --ai' will be unavailable." >&2 ;;
+      claude)   echo "Note: 'claude' CLI not found — 'claude-insights' still works on stored data, but Claude must have run at least once." >&2 ;;
+      sqlite3)  echo "Note: 'sqlite3' not found — 'codex-insights' needs it to read state_5.sqlite." >&2 ;;
+    esac
   fi
 done
 
@@ -33,19 +43,27 @@ else
   git clone --quiet "$REPO" "$INSTALL_DIR"
 fi
 
-chmod +x "${INSTALL_DIR}/codex-insights" "${INSTALL_DIR}/analyze.sh"
+# Mark all executables
+for f in codex-insights claude-insights insights analyze.sh analyze-claude.sh analyze-combined.sh; do
+  [[ -f "${INSTALL_DIR}/${f}" ]] && chmod +x "${INSTALL_DIR}/${f}"
+done
 
-# Bin
-ln -sfn "${INSTALL_DIR}/codex-insights" "${BIN_DIR}/codex-insights"
+# Symlink CLIs into BIN_DIR
+for cli in codex-insights claude-insights insights; do
+  [[ -f "${INSTALL_DIR}/${cli}" ]] && ln -sfn "${INSTALL_DIR}/${cli}" "${BIN_DIR}/${cli}"
+done
 
-# Skills (Claude Code / Codex)
+# Register the codex-insights skill (only one with SKILL.md currently)
 for dir in "${HOME}/.skills" "${HOME}/.claude/skills" "${HOME}/.codex/skills"; do
   [[ -d "$(dirname "$dir")" ]] || continue
   mkdir -p "$dir"
   ln -sfn "$INSTALL_DIR" "${dir}/codex-insights"
 done
 
-echo "Done! Run: codex-insights"
+echo "Done! Try:"
+echo "  codex-insights      # Codex dashboard"
+echo "  claude-insights     # Claude dashboard"
+echo "  insights            # Combined view"
 
 if ! echo "$PATH" | tr ':' '\n' | grep -q "^${BIN_DIR}$"; then
   echo ""

@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: ShellCheck
-        run: shellcheck --severity=info codex-insights analyze.sh install.sh
+        run: shellcheck --severity=info codex-insights claude-insights insights analyze.sh analyze-claude.sh analyze-combined.sh install.sh
 
   test:
     name: Test
@@ -24,7 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Syntax check
-        run: bash -n codex-insights && bash -n analyze.sh && bash -n install.sh
+        run: |
+          for f in codex-insights claude-insights insights analyze.sh analyze-claude.sh analyze-combined.sh install.sh; do
+            bash -n "$f"
+          done
 
       - name: Test analyze.sh with mock data
         run: |
@@ -69,17 +72,17 @@ jobs:
           cat > ~/.codex/usage-data/insights.json <<'INSIGHTS'
           {
             "at_a_glance": {
-              "working": "テスト用のワーキングメッセージ",
-              "hindering": "テスト用の摩擦メッセージ",
-              "quick_wins": "テスト用のクイックウィン"
+              "working": "test working message",
+              "hindering": "test friction message",
+              "quick_wins": "test quick win"
             },
-            "wins": [{"title": "テスト成功", "desc": "テスト説明"}],
-            "friction": [{"title": "テスト摩擦", "desc": "摩擦説明", "example": "例文"}],
-            "instructions_additions": [{"text": "テストルール", "why": "テスト理由"}],
-            "suggestions": [{"title": "提案1", "desc": "提案説明", "prompt": "テストプロンプト"}],
+            "wins": [{"title": "test success", "desc": "test description"}],
+            "friction": [{"title": "test friction", "desc": "friction description", "example": "example text"}],
+            "instructions_additions": [{"text": "test rule", "why": "test reason"}],
+            "suggestions": [{"title": "suggestion 1", "desc": "suggestion description", "prompt": "test prompt"}],
             "comparison": {
-              "codex": ["Codex特徴1"],
-              "claude": ["Claude特徴1"]
+              "codex": ["Codex feature 1"],
+              "claude": ["Claude feature 1"]
             }
           }
           INSIGHTS
@@ -88,11 +91,11 @@ jobs:
           test -f "$output"
 
           # Validate AI-generated sections are rendered
-          grep -q 'テスト用のワーキングメッセージ' "$output"
-          grep -q 'テスト成功' "$output"
-          grep -q 'テスト摩擦' "$output"
-          grep -q '提案1' "$output"
-          grep -q 'Codex特徴1' "$output"
+          grep -q 'test working message' "$output"
+          grep -q 'test success' "$output"
+          grep -q 'test friction' "$output"
+          grep -q 'suggestion 1' "$output"
+          grep -q 'Codex feature 1' "$output"
           echo "Insights integration validated"
 
       - name: Test HTML escaping
@@ -120,7 +123,7 @@ jobs:
             echo "FAIL: unescaped <script> tag found"
             exit 1
           fi
-          grep -q '&lt;script&gt;' "$output" || grep -q 'lt;script' "$output"
+          grep -q '&lt;script&gt;' "$output"
           if grep -q '<img onerror' "$output"; then
             echo "FAIL: unescaped <img> tag found"
             exit 1
@@ -148,7 +151,11 @@ jobs:
 
           bash install.sh
 
-          # Verify symlink
+          # Verify symlinks for all three CLIs
           test -L ~/.local/bin/codex-insights
-          test -x ~/.local/share/codex-insights/codex-insights
+          test -L ~/.local/bin/claude-insights
+          test -L ~/.local/bin/insights
+          test -x ~/.local/share/ai-insights/codex-insights
+          test -x ~/.local/share/ai-insights/claude-insights
+          test -x ~/.local/share/ai-insights/insights
           echo "Install verified"

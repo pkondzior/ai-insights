@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# claude-insights - Quantitative dashboard for Claude Code session data
+# Sister tool to codex-insights, applied to ~/.claude data.
+set -euo pipefail
+
+# Resolve symlinks to find real script location
+SOURCE="$0"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+ANALYZE_SH="${SCRIPT_DIR}/analyze-claude.sh"
+
+CLAUDE_DIR="${HOME}/.claude"
+SESSION_META_DIR="${CLAUDE_DIR}/usage-data/session-meta"
+OUTPUT_DIR="${CLAUDE_DIR}/usage-data"
+mkdir -p "$OUTPUT_DIR"
+
+OPEN_REPORT=true
+
+usage() {
+  cat <<'EOF'
+Usage:
+  claude-insights
+      Generate a local stats dashboard from Claude Code session-meta data.
+
+Options:
+  --no-open      Do not open the report in a browser.
+  -h, --help     Show this help.
+
+Data source:
+  Reads ~/.claude/usage-data/session-meta/*.json (pre-computed by Claude /insights).
+  If recent sessions are missing, run Claude's /insights command first to refresh.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-open) OPEN_REPORT=false; shift ;;
+    --open) OPEN_REPORT=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required (brew install jq)" >&2
+  exit 1
+fi
+
+if [[ ! -d "$SESSION_META_DIR" ]]; then
+  echo "Error: ${SESSION_META_DIR} not found." >&2
+  echo "Run Claude Code's /insights command first to populate session metadata." >&2
+  exit 1
+fi
+
+meta_count=$(find "$SESSION_META_DIR" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')
+if [[ "$meta_count" -eq 0 ]]; then
+  echo "Error: no session-meta JSON files found in ${SESSION_META_DIR}." >&2
+  echo "Run Claude's /insights to generate per-session metadata." >&2
+  exit 1
+fi
+
+echo "Reading ${meta_count} session-meta entries from ${SESSION_META_DIR}..."
+output=$(bash "$ANALYZE_SH")
+echo "Report: ${output}"
+
+if [[ "$OPEN_REPORT" == true ]]; then
+  if command -v open &>/dev/null; then
+    open "$output"
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "$output"
+  else
+    echo "Open in browser: ${output}"
+  fi
+fi

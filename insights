@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# insights - Combined dashboard aggregating Codex CLI and Claude Code activity.
+# Reads from ~/.codex/state_5.sqlite + ~/.claude/usage-data/session-meta/*.json
+# and walks the corresponding rollout JSONLs for honest token counts.
+set -euo pipefail
+
+SOURCE="$0"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+ANALYZE_SH="${SCRIPT_DIR}/analyze-combined.sh"
+
+OUTPUT_DIR="${HOME}/.local/share/ai-insights"
+mkdir -p "$OUTPUT_DIR"
+
+OPEN_REPORT=true
+
+usage() {
+  cat <<'EOF'
+Usage:
+  insights
+      Generate a combined HTML dashboard merging Codex and Claude activity.
+
+Options:
+  --no-open      Do not open the report in a browser.
+  -h, --help     Show this help.
+
+Data sources:
+  - Codex:  ~/.codex/state_5.sqlite (threads table)
+  - Claude: ~/.claude/usage-data/session-meta/*.json + raw rollout JSONLs
+
+Output: ~/.local/share/ai-insights/report.html
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-open) OPEN_REPORT=false; shift ;;
+    --open) OPEN_REPORT=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+for cmd in jq sqlite3; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "Error: $cmd is required" >&2
+    exit 1
+  fi
+done
+
+codex_ok=false
+claude_ok=false
+[[ -f "${HOME}/.codex/state_5.sqlite" ]] && codex_ok=true
+[[ -d "${HOME}/.claude/usage-data/session-meta" ]] && \
+  [[ "$(find "${HOME}/.claude/usage-data/session-meta" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')" -gt 0 ]] && claude_ok=true
+
+if [[ "$codex_ok" != true && "$claude_ok" != true ]]; then
+  echo "Error: neither Codex nor Claude data found." >&2
+  echo "  Codex needs ~/.codex/state_5.sqlite" >&2
+  echo "  Claude needs ~/.claude/usage-data/session-meta/ (populated by /insights)" >&2
+  exit 1
+fi
+
+[[ "$codex_ok"  == true ]] && echo "Codex data:  detected"  || echo "Codex data:  not found (skipping)"
+[[ "$claude_ok" == true ]] && echo "Claude data: detected"  || echo "Claude data: not found (skipping)"
+
+output=$(CODEX_OK="$codex_ok" CLAUDE_OK="$claude_ok" bash "$ANALYZE_SH")
+echo "Report: ${output}"
+
+if [[ "$OPEN_REPORT" == true ]]; then
+  if command -v open &>/dev/null; then
+    open "$output"
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "$output"
+  else
+    echo "Open in browser: ${output}"
+  fi
+fi
